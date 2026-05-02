@@ -51,6 +51,7 @@ Speaker → Whisper (translation) → Relay (WebSocket) → Listener
 ### 1. Clone repository
 
 ```bash
+cd ~
 git clone https://github.com/ManolisMariakakis/speech2speech-translation.git
 cd speech2speech-translation
 ```
@@ -68,10 +69,11 @@ pip install faster-whisper websockets hf_transfer
 ### 3. Clone whisper-live
 
 ```bash
+cd ~
 git clone https://github.com/collabora/whisper-live.git
 cd whisper-live
 
-pip install -r requirements/server.txt
+pip install -r rcd ~equirements/server.txt
 ```
 
 ---
@@ -81,7 +83,7 @@ pip install -r requirements/server.txt
 ### 1. Start Whisper server
 
 ```bash
-cd whisper-live
+cd ~/whisper-live
 
 python run_server.py   --port 8000   --backend faster_whisper   --no_single_model   --raw_pcm_input   --max_connection_time 86400
 ```
@@ -91,7 +93,7 @@ python run_server.py   --port 8000   --backend faster_whisper   --no_single_mode
 ### 2. Start Relay server
 
 ```bash
-cd ..
+cd ~/speech2speech-translation
 python relay.py
 ```
 
@@ -100,7 +102,7 @@ python relay.py
 ### 3. Start Web UI
 
 ```bash
-cd speech2speech
+cd ~/speech2speech-translation/speech2speech
 python3 -m http.server 8080
 ```
 
