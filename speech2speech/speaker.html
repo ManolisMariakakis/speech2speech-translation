@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Speaker - Greek to English Realtime</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+body{font-family:Arial,sans-serif;margin:20px;background:#f7f7f7;text-align:center;color:#222}
+button,select{padding:12px 18px;font-size:18px;margin:5px}
+button:disabled{opacity:.5;cursor:not-allowed}
+#status{margin-top:15px;font-size:18px;color:green}
+#error{color:red;white-space:pre-wrap;margin-top:10px}
+.box{background:white;border:1px solid #ccc;border-radius:8px;padding:15px;margin-top:15px;min-height:90px;text-align:left;white-space:pre-wrap;font-size:20px}
+.grid{max-width:950px;margin:auto}
+.small{font-size:14px;color:#666}
+</style>
+</head>
+<body>
+<div class="grid">
+<h2>Speaker: Greek → English</h2>
+
+<button id="startBtn">Start microphone</button>
+<button id="stopBtn" disabled>Stop</button>
+
+<label>
+Model:
+<select id="modelSelect">
+  <option value="small">small</option>
+  <option value="medium">medium</option>
+  <option value="large-v3" selected>large-v3</option>
+</select>
+</label>
+
+<div id="status">Idle</div>
+<div id="error"></div>
+<div class="small" id="urls"></div>
+
+<h3>Current Whisper Text</h3>
+<div id="current" class="box"></div>
+
+<h3>Pending Stable Segments</h3>
+<div id="pending" class="box"></div>
+
+<h3>Sent to Listener</h3>
+<div id="sent" class="box"></div>
+</div>
+
+<script>
+let whisperWs=null, relayWs=null;
+let audioContext=null, processor=null, inputNode=null, stream=null;
+let sentSegmentKeys=new Set(), sentTexts=[], pendingSegments=[];
+let commitTimer=null;
+let relayQueue=[];
+let started=false;
+
+const COMMIT_DELAY_MS=1200;
+const TARGET_SAMPLE_RATE=16000;
+
+const startBtn=document.getElementById("startBtn");
+const stopBtn=document.getElementById("stopBtn");
+const statusDiv=document.getElementById("status");
+const errorDiv=document.getElementById("error");
+const currentDiv=document.getElementById("current");
+const pendingDiv=document.getElementById("pending");
+const sentDiv=document.getElementById("sent");
+const modelSelect=document.getElementById("modelSelect");
+const urlsDiv=document.getElementById("urls");
+
+startBtn.onclick=start;
+stopBtn.onclick=stop;
+
+function cleanText(text){
+  return String(text||"").replace(/\s+/g," ").replace(/\s+([.,!?;:])/g,"$1").trim();
+}
+function normalize(text){
+  return cleanText(text).toLowerCase().replace(/[.,!?;:"'()[\]]/g,"").trim();
+}
+function wordOverlapRatio(a,b){
+  const aw=normalize(a).split(/\s+/).filter(Boolean);
+  const bw=normalize(b).split(/\s+/).filter(Boolean);
+  if(!aw.length||!bw.length)return 0;
+  const setA=new Set(aw);
+  let overlap=0;
+  for(const w of bw) if(setA.has(w)) overlap++;
+  return overlap/Math.min(aw.length,bw.length);
+}
+function isSimilar(a,b){
+  const na=normalize(a), nb=normalize(b);
+  if(!na||!nb)return false;
+  if(na===nb)return true;
+  if(na.length>12&&nb.includes(na))return true;
+  if(nb.length>12&&na.includes(nb))return true;
+  return na.length>24&&nb.length>24&&wordOverlapRatio(na,nb)>0.78;
+}
+function getHost(port){
+  if(location.hostname.includes(".proxy.runpod.net")){
+    const base=location.hostname.replace(/-\d+\.proxy\.runpod\.net$/,"");
+    return `${base}-${port}.proxy.runpod.net`;
+  }
+  return `${location.hostname}:${port}`;
+}
+function getWsUrl(port,path=""){
+  const protocol=location.protocol==="https:"?"wss:":"ws:";
+  return protocol+"//"+getHost(port)+path;
+}
+function renderUrls(){
+  urlsDiv.innerText=`Whisper: ${getWsUrl(8000)} | Relay: ${getWsUrl(9001)}`;
+}
+function downsampleBuffer(buffer,inputRate,outRate){
+  if(inputRate===outRate)return buffer;
+  const ratio=inputRate/outRate;
+  const newLength=Math.round(buffer.length/ratio);
+  const result=new Float32Array(newLength);
+  let offsetResult=0, offsetBuffer=0;
+  while(offsetResult<result.length){
+    const nextOffsetBuffer=Math.round((offsetResult+1)*ratio);
+    let accum=0,count=0;
+    for(let i=offsetBuffer;i<nextOffsetBuffer&&i<buffer.length;i++){
+      accum+=buffer[i]; count++;
+    }
+    result[offsetResult]=count?accum/count:0;
+    offsetResult++;
+    offsetBuffer=nextOffsetBuffer;
+  }
+  return result;
+}
+function floatTo16BitPCM(float32Array){
+  const buffer=new ArrayBuffer(float32Array.length*2);
+  const view=new DataView(buffer);
+  for(let i=0;i<float32Array.length;i++){
+    const s=Math.max(-1,Math.min(1,float32Array[i]));
+    view.setInt16(i*2, s<0?s*0x8000:s*0x7fff, true);
+  }
+  return buffer;
+}
+function makeSegmentKey(segment){
+  const start=segment.start??segment.start_time??"";
+  const end=segment.end??segment.end_time??"";
+  const text=normalize(segment.text||"");
+  if(start!==""||end!=="") return `${start}-${end}-${text.slice(0,140)}`;
+  return text.slice(0,180);
+}
+function wasAlreadySent(text){
+  return sentTexts.some(old=>isSimilar(text,old));
+}
+function rememberSent(text){
+  sentTexts.push(text);
+  if(sentTexts.length>140)sentTexts.shift();
+}
+function renderPending(){
+  pendingDiv.innerText=pendingSegments.map(p=>cleanText(p.text)).filter(Boolean).join("\n");
+}
+function addPendingSegment(segment){
+  const text=cleanText(segment.text||segment);
+  if(!text||text==="..."||text==="…")return;
+  const key=typeof segment==="object"?makeSegmentKey(segment):normalize(text).slice(0,180);
+  if(sentSegmentKeys.has(key)||wasAlreadySent(text))return;
+
+  for(let i=0;i<pendingSegments.length;i++){
+    if(isSimilar(text,pendingSegments[i].text)){
+      if(text.length>=pendingSegments[i].text.length){
+        pendingSegments[i]={key,text,createdAt:Date.now()};
+      }
+      renderPending();
+      scheduleCommit();
+      return;
+    }
+  }
+  pendingSegments.push({key,text,createdAt:Date.now()});
+  renderPending();
+  scheduleCommit();
+}
+function scheduleCommit(){
+  clearTimeout(commitTimer);
+  commitTimer=setTimeout(commitReadySegments,COMMIT_DELAY_MS);
+}
+function commitReadySegments(){
+  const now=Date.now();
+  const remaining=[];
+  for(const item of pendingSegments){
+    if(now-item.createdAt>=COMMIT_DELAY_MS) commitSegment(item);
+    else remaining.push(item);
+  }
+  pendingSegments=remaining;
+  renderPending();
+  if(pendingSegments.length)scheduleCommit();
+}
+function commitSegment(item){
+  if(!item||!item.text)return;
+  if(sentSegmentKeys.has(item.key)||wasAlreadySent(item.text))return;
+  sentSegmentKeys.add(item.key);
+  if(sentSegmentKeys.size>800){
+    sentSegmentKeys=new Set(Array.from(sentSegmentKeys).slice(-500));
+  }
+  sendToRelay(item.text);
+}
+function sendToRelay(text){
+  text=cleanText(text);
+  if(!text||wasAlreadySent(text))return;
+  rememberSent(text);
+  sentDiv.innerText+=(sentDiv.innerText.trim()?"\n":"")+text;
+  const payload=JSON.stringify({type:"translation",text,lang:"en",ts:Date.now()});
+  if(relayWs&&relayWs.readyState===WebSocket.OPEN) relayWs.send(payload);
+  else relayQueue.push(payload);
+}
+function flushRelayQueue(){
+  if(!relayWs||relayWs.readyState!==WebSocket.OPEN)return;
+  while(relayQueue.length) relayWs.send(relayQueue.shift());
+}
+function processWhisperMessage(data){
+  if(data.message||data.status){
+    console.log("Server:",data);
+  }
+
+  if(Array.isArray(data.segments)){
+    const allText=data.segments.map(s=>cleanText(s.text||"")).filter(Boolean).join(" ");
+    if(allText) currentDiv.innerText=allText;
+
+    for(const segment of data.segments){
+      const text=cleanText(segment.text||"");
+      if(!text)continue;
+
+      // whisper-live normally marks stable/final segments as completed.
+      // If no completed field exists, send only longer sentence-like chunks.
+      if(segment.completed===true || segment.final===true){
+        addPendingSegment(segment);
+      }
+    }
+    return;
+  }
+
+  const text=cleanText(data.text||data.translation||data.transcription||"");
+  if(text){
+    currentDiv.innerText=text;
+    // Fallback for servers that emit final text without segments.
+    if(/[.!?]$/.test(text) || text.split(/\s+/).length>=10) addPendingSegment(text);
+  }
+}
+function connectRelay(){
+  relayWs=new WebSocket(getWsUrl(9001));
+  relayWs.onopen=()=>{ console.log("Relay connected"); flushRelayQueue(); };
+  relayWs.onerror=()=>{ console.warn("Relay error"); };
+  relayWs.onclose=()=>{ if(started){ setTimeout(connectRelay,1500); } };
+}
+async function start(){
+  try{
+    started=true;
+    startBtn.disabled=true;
+    stopBtn.disabled=false;
+    errorDiv.innerText="";
+    currentDiv.innerText="";
+    pendingDiv.innerText="";
+    sentDiv.innerText="";
+    sentSegmentKeys=new Set();
+    sentTexts=[];
+    pendingSegments=[];
+    relayQueue=[];
+
+    renderUrls();
+    statusDiv.innerText="Requesting microphone...";
+
+    stream=await navigator.mediaDevices.getUserMedia({
+      audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}
+    });
+
+    statusDiv.innerText="Connecting relay and whisper-live...";
+    connectRelay();
+
+    whisperWs=new WebSocket(getWsUrl(8000));
+    whisperWs.binaryType="arraybuffer";
+
+    whisperWs.onopen=async()=>{
+      const config={
+        uid:"speaker-"+Date.now(),
+        language:"el",
+        task:"translate",
+        model:modelSelect.value,
+        use_vad:true
+      };
+      whisperWs.send(JSON.stringify(config));
+
+      audioContext=new AudioContext();
+      await audioContext.resume();
+
+      inputNode=audioContext.createMediaStreamSource(stream);
+      processor=audioContext.createScriptProcessor(4096,1,1);
+
+      inputNode.connect(processor);
+      processor.connect(audioContext.destination);
+
+      processor.onaudioprocess=(e)=>{
+        if(!whisperWs||whisperWs.readyState!==WebSocket.OPEN)return;
+        const input=e.inputBuffer.getChannelData(0);
+        const downsampled=downsampleBuffer(input,audioContext.sampleRate,TARGET_SAMPLE_RATE);
+        const pcm=floatTo16BitPCM(downsampled);
+        whisperWs.send(pcm);
+      };
+
+      statusDiv.innerText=`Connected. Speak Greek. Browser audio ${audioContext.sampleRate}Hz → 16000Hz PCM`;
+    };
+
+    whisperWs.onmessage=(event)=>{
+      try{
+        const data=JSON.parse(event.data);
+        processWhisperMessage(data);
+      }catch(err){
+        console.warn("Non JSON message:",event.data);
+      }
+    };
+    whisperWs.onerror=(e)=>{
+      console.error(e);
+      errorDiv.innerText="Whisper WebSocket error. Check port 8000 and server logs.";
+    };
+    whisperWs.onclose=()=>{
+      if(started)statusDiv.innerText="Whisper connection closed";
+    };
+
+  }catch(err){
+    console.error(err);
+    statusDiv.innerText="Start error";
+    errorDiv.innerText=err.message||String(err);
+    startBtn.disabled=false;
+    stopBtn.disabled=true;
+  }
+}
+function stop(){
+  started=false;
+  clearTimeout(commitTimer);
+  commitReadySegments();
+
+  if(processor){processor.disconnect();processor=null;}
+  if(inputNode){inputNode.disconnect();inputNode=null;}
+  if(audioContext){audioContext.close();audioContext=null;}
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
+
+  if(whisperWs){whisperWs.close();whisperWs=null;}
+  if(relayWs){relayWs.close();relayWs=null;}
+
+  startBtn.disabled=false;
+  stopBtn.disabled=true;
+  statusDiv.innerText="Stopped";
+}
+renderUrls();
+</script>
+</body>
+</html>

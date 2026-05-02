@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Greek → English Speech Translation (large-v3)</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    text-align: center;
+    margin: 40px;
+  }
+  button {
+    padding: 10px 20px;
+    font-size: 18px;
+    margin: 5px;
+  }
+  #status {
+    margin-top: 20px;
+    font-size: 18px;
+    color: #006600;
+  }
+  #output {
+    margin-top: 25px;
+    padding: 15px;
+    border: 1px solid #ccc;
+    min-height: 80px;
+    font-size: 22px;
+    text-align: left;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+
+<body>
+
+<h2>Greek → English Speech Translation (large-v3)</h2>
+
+<button id="startBtn">Start</button>
+<button id="stopBtn">Stop</button>
+
+<div id="status">Idle</div>
+
+<h3>English Output</h3>
+<div id="output">...</div>
+
+<script>
+let ws = null;
+let audioContext = null;
+let processor = null;
+let input = null;
+let globalStream = null;
+
+let lastSpokenText = "";
+
+const statusDiv = document.getElementById("status");
+const outputDiv = document.getElementById("output");
+
+document.getElementById("startBtn").onclick = start;
+document.getElementById("stopBtn").onclick = stop;
+
+async function start() {
+  try {
+    statusDiv.innerText = "Requesting microphone...";
+    outputDiv.innerText = "...";
+    lastSpokenText = "";
+
+    globalStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+
+    statusDiv.innerText = "Microphone OK. Connecting...";
+
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 16000
+    });
+
+    input = audioContext.createMediaStreamSource(globalStream);
+    processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+    input.connect(processor);
+    processor.connect(audioContext.destination);
+
+    const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const wsHost = location.hostname.replace("-8080", "-8000");
+    const wsUrl = wsProtocol + "//" + wsHost;
+
+    console.log("Connecting to:", wsUrl);
+
+    ws = new WebSocket(wsUrl);
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+      statusDiv.innerText = "Connected. Speak Greek...";
+
+      ws.send(JSON.stringify({
+        uid: "user-" + Date.now(),
+        language: "el",
+        task: "translate",
+        model: "large-v3",   // 🔥 upgraded model
+        use_vad: false       // πιο σταθερό
+      }));
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+
+        let text = "";
+
+        if (data.segments && Array.isArray(data.segments)) {
+          const completed = data.segments
+            .filter(s => s.completed === true && s.text)
+            .map(s => s.text.trim());
+
+          text = completed.join(" ");
+        } else if (data.text) {
+          text = data.text.trim();
+        }
+
+        if (!text) return;
+
+        outputDiv.innerText = text;
+
+        if (text !== lastSpokenText) {
+          lastSpokenText = text;
+          speakEnglish(text);
+        }
+
+      } catch (e) {
+        console.log("Non-JSON:", event.data);
+      }
+    };
+
+    ws.onerror = (err) => {
+      console.error(err);
+      statusDiv.innerText = "WebSocket error (F12)";
+    };
+
+    ws.onclose = () => {
+      statusDiv.innerText = "Connection closed";
+    };
+
+    processor.onaudioprocess = (e) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+      const inputData = e.inputBuffer.getChannelData(0);
+      const int16 = new Int16Array(inputData.length);
+
+      for (let i = 0; i < inputData.length; i++) {
+        const s = Math.max(-1, Math.min(1, inputData[i]));
+        int16[i] = s < 0 ? s * 32768 : s * 32767;
+      }
+
+      ws.send(int16.buffer);
+    };
+
+  } catch (err) {
+    console.error(err);
+    statusDiv.innerText = "Microphone error (F12)";
+  }
+}
+
+function stop() {
+  if (processor) processor.disconnect();
+  if (input) input.disconnect();
+  if (audioContext) audioContext.close();
+
+  if (globalStream) {
+    globalStream.getTracks().forEach(track => track.stop());
+  }
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.close();
+  }
+
+  statusDiv.innerText = "Stopped";
+}
+
+function speakEnglish(text) {
+  try {
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = "en-US";
+    utter.rate = 1;
+    speechSynthesis.speak(utter);
+  } catch (e) {
+    console.error("TTS error:", e);
+  }
+}
+</script>
+
+</body>
+</html>

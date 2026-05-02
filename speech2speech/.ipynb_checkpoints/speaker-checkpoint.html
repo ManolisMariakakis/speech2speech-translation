@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Speaker - Stable Segment Commit</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<style>
+body {
+  font-family: Arial, sans-serif;
+  margin: 20px;
+  background: #f7f7f7;
+  text-align: center;
+}
+button, select {
+  padding: 12px 18px;
+  font-size: 18px;
+  margin: 5px;
+}
+#status {
+  margin-top: 15px;
+  font-size: 18px;
+  color: green;
+}
+#error {
+  color: red;
+  white-space: pre-wrap;
+  margin-top: 10px;
+}
+.box {
+  background: white;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  padding: 15px;
+  margin-top: 15px;
+  min-height: 100px;
+  text-align: left;
+  white-space: pre-wrap;
+  font-size: 20px;
+}
+</style>
+</head>
+
+<body>
+
+<h2>Speaker: Greek → English</h2>
+
+<button id="startBtn">Start</button>
+<button id="stopBtn">Stop</button>
+
+<label>
+Model:
+<select id="modelSelect">
+  <option value="small">small</option>
+  <option value="medium">medium</option>
+  <option value="large-v3" selected>large-v3</option>
+</select>
+</label>
+
+<div id="status">Idle</div>
+<div id="error"></div>
+
+<h3>Current Whisper Text</h3>
+<div id="current" class="box"></div>
+
+<h3>Pending Stable Segments</h3>
+<div id="pending" class="box"></div>
+
+<h3>Sent to Listener</h3>
+<div id="sent" class="box"></div>
+
+<script>
+let whisperWs = null;
+let relayWs = null;
+let audioContext = null;
+let processor = null;
+let input = null;
+let stream = null;
+
+let sentSegmentKeys = new Set();
+let sentTexts = [];
+let pendingSegments = [];
+let commitTimer = null;
+
+const COMMIT_DELAY_MS = 500;
+
+const statusDiv = document.getElementById("status");
+const errorDiv = document.getElementById("error");
+const currentDiv = document.getElementById("current");
+const pendingDiv = document.getElementById("pending");
+const sentDiv = document.getElementById("sent");
+const modelSelect = document.getElementById("modelSelect");
+
+document.getElementById("startBtn").onclick = start;
+document.getElementById("stopBtn").onclick = stop;
+
+function cleanText(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([.,!?;:])/g, "$1")
+    .trim();
+}
+
+function normalize(text) {
+  return cleanText(text)
+    .toLowerCase()
+    .replace(/[.,!?;:"'()\[\]]/g, "")
+    .trim();
+}
+
+function wordOverlapRatio(a, b) {
+  const aw = normalize(a).split(/\s+/).filter(Boolean);
+  const bw = normalize(b).split(/\s+/).filter(Boolean);
+  if (!aw.length || !bw.length) return 0;
+
+  const setA = new Set(aw);
+  let overlap = 0;
+  for (const w of bw) if (setA.has(w)) overlap++;
+
+  return overlap / Math.min(aw.length, bw.length);
+}
+
+function isSimilar(a, b) {
+  const na = normalize(a);
+  const nb = normalize(b);
+
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+
+  if (na.length > 8 && nb.includes(na)) return true;
+  if (nb.length > 8 && na.includes(nb)) return true;
+
+  if (na.length > 20 && nb.length > 20 && wordOverlapRatio(na, nb) > 0.72) {
+    return true;
+  }
+
+  return false;
+}
+
+function getHost(port) {
+  if (location.hostname.includes(".proxy.runpod.net")) {
+    const base = location.hostname.replace(/-\d+\.proxy\.runpod\.net$/, "");
+    return base + "-" + port + ".proxy.runpod.net";
+  }
+  return location.hostname + ":" + port;
+}
+
+function makeSegmentKey(segment) {
+  const start = segment.start ?? segment.start_time ?? "";
+  const end = segment.end ?? segment.end_time ?? "";
+  const text = normalize(segment.text || "");
+
+  if (start !== "" || end !== "") {
+    return `${start}-${end}-${text.slice(0, 140)}`;
+  }
+  return text.slice(0, 180);
+}
+
+function wasAlreadySent(text) {
+  for (const old of sentTexts) {
+    if (isSimilar(text, old)) return true;
+  }
+  return false;
+}
+
+function rememberSent(text) {
+  sentTexts.push(text);
+  if (sentTexts.length > 120) sentTexts.shift();
+}
+
+function renderPending() {
+  const visible = pendingSegments
+    .map(p => cleanText(p.text))
+    .filter(t => t && t !== "..." && t !== "…");
+
+  pendingDiv.innerText = visible.join("\n");
+}
+
+function addPendingSegment(segment) {
+  const text = cleanText(segment.text || "");
+  if (!text) return;
+
+  const key = makeSegmentKey(segment);
+
+  if (sentSegmentKeys.has(key)) return;
+  if (wasAlreadySent(text)) return;
+
+  for (let i = 0; i < pendingSegments.length; i++) {
+    if (isSimilar(text, pendingSegments[i].text)) {
+      if (text.length >= pendingSegments[i].text.length) {
+        pendingSegments[i] = { key, text, createdAt: Date.now() };
+      }
+      renderPending();
+      scheduleCommit();
+      return;
+    }
+  }
+
+  pendingSegments.push({ key, text, createdAt: Date.now() });
+  renderPending();
+  scheduleCommit();
+}
+
+function scheduleCommit() {
+  clearTimeout(commitTimer);
+  commitTimer = setTimeout(commitReadySegments, COMMIT_DELAY_MS);
+}
+
+function commitReadySegments() {
+  const now = Date.now();
+  const remaining = [];
+
+  for (const item of pendingSegments) {
+    if (now - item.createdAt >= COMMIT_DELAY_MS) {
+      commitSegment(item);
+    } else {
+      remaining.push(item);
+    }
+  }
+
+  pendingSegments = remaining;
+  renderPending();
+
+  if (pendingSegments.length) scheduleCommit();
+}
+
+function commitSegment(item) {
+  if (!item || !item.text) return;
+  if (sentSegmentKeys.has(item.key)) return;
+  if (wasAlreadySent(item.text)) return;
+
+  sentSegmentKeys.add(item.key);
+
+  if (sentSegmentKeys.size > 700) {
+    sentSegmentKeys = new Set(Array.from(sentSegmentKeys).slice(-400));
+  }
+
+  sendToRelay(item.text);
+}
+
+function sendToRelay(text) {
+  text = cleanText(text);
+  if (!text) return;
+  if (wasAlreadySent(text)) return;
+
+  rememberSent(text);
+
+  if (!sentDiv.innerText.trim()) {
+    sentDiv.innerText = text;
+  } else {
+    sentDiv.innerText += "\n" + text;
+  }
+
+  if (relayWs && relayWs.readyState === WebSocket.OPEN) {
+    relayWs.send(JSON.stringify({
+      type: "translation",
+      text,
+      ts: Date.now()
+    }));
+  } else {
+    errorDiv.innerText = "Relay is not connected.";
+  }
+}
+
+function processWhisperMessage(data) {
+  if (!data.segments || !Array.isArray(data.segments)) {
+    if (data.text) currentDiv.innerText = cleanText(data.text);
+    return;
+  }
+
+  const allText = data.segments
+    .map(s => cleanText(s.text || ""))
+    .filter(Boolean)
+    .join(" ");
+
+  if (allText) currentDiv.innerText = allText;
+
+  for (const segment of data.segments) {
+    if (segment.completed === true) {
+      addPendingSegment(segment);
+    }
+  }
+}
+
+async function start() {
+  try {
+    errorDiv.innerText = "";
+    statusDiv.innerText = "Requesting microphone...";
+
+    currentDiv.innerText = "";
+    pendingDiv.innerText = "";
+    sentDiv.innerText = "";
+
+    sentSegmentKeys = new Set();
+    sentTexts = [];
+    pendingSegments = [];
+
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    audioContext = new AudioContext({ sampleRate: 16000 });
+    input = audioContext.createMediaStreamSource(stream);
+    processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+    input.connect(processor);
+    processor.connect(audioContext.destination);
+
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const whisperUrl = protocol + "//" + getHost(8000);
+    const relayUrl = protocol + "//" + getHost(9001);
+
+    relayWs = new WebSocket(relayUrl);
+
+    whisperWs = new WebSocket(whisperUrl);
+    whisperWs.binaryType = "arraybuffer";
+
+    whisperWs.onopen = () => {
+      statusDiv.innerText = "Connected. Speak Greek...";
+
+      whisperWs.send(JSON.stringify({
+        uid: "speaker-" + Date.now(),
+        language: "el",
+        task: "translate",
+        model: modelSelect.value
+      }));
+    };
+
+    whisperWs.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        processWhisperMessage(data);
+      } catch (err) {
+        errorDiv.innerText = "Parse error";
+      }
+    };
+
+    processor.onaudioprocess = (e) => {
+      if (!whisperWs || whisperWs.readyState !== 1) return;
+
+      const inputData = e.inputBuffer.getChannelData(0);
+      const int16 = new Int16Array(inputData.length);
+
+      for (let i = 0; i < inputData.length; i++) {
+        const s = Math.max(-1, Math.min(1, inputData[i]));
+        int16[i] = s < 0 ? s * 32768 : s * 32767;
+      }
+
+      whisperWs.send(int16.buffer);
+    };
+
+  } catch (err) {
+    statusDiv.innerText = "Start error";
+    errorDiv.innerText = err.message;
+  }
+}
+
+function stop() {
+  commitReadySegments();
+
+  if (processor) processor.disconnect();
+  if (input) input.disconnect();
+  if (audioContext) audioContext.close();
+  if (stream) stream.getTracks().forEach(t => t.stop());
+
+  if (whisperWs) whisperWs.close();
+  if (relayWs) relayWs.close();
+
+  statusDiv.innerText = "Stopped";
+}
+</script>
+
+</body>
+</html>
