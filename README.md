@@ -1,4 +1,4 @@
-# 🎙️ Speech2Speech Translation (Greek → English)
+# Speech2Speech Translation (Greek → English)
 
 Real-time speech translation system that converts **spoken Greek into English text and audio**, designed for live environments such as churches, conferences, and events.
 
