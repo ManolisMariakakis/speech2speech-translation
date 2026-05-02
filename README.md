@@ -4,18 +4,18 @@ Real-time speech translation system that converts **spoken Greek into English te
 
 ---
 
-## 🚀 Features
+## Features
 
-- 🎤 Live microphone input (Greek speech)
-- 🌍 Real-time translation to English
-- ⚡ Low-latency streaming
-- 🔊 Audio playback via browser Text-to-Speech (TTS)
-- 🧠 Powered by Whisper (faster-whisper via whisper-live)
-- 🔁 WebSocket-based broadcast to multiple listeners
+- Live microphone input (Greek speech)
+- Real-time translation to English
+- Low-latency streaming
+- Audio playback via browser Text-to-Speech (TTS)
+- Powered by Whisper (faster-whisper via whisper-live)
+- WebSocket-based broadcast to multiple listeners
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 Speaker → Whisper (translation) → Relay (WebSocket) → Listener
 
@@ -35,7 +35,7 @@ Speaker → Whisper (translation) → Relay (WebSocket) → Listener
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 - Python
 - whisper-live
@@ -46,7 +46,7 @@ Speaker → Whisper (translation) → Relay (WebSocket) → Listener
 
 ---
 
-## 📦 Installation
+## Installation
 
 ### 1. Clone repository
 
@@ -78,7 +78,7 @@ pip install -r rcd ~equirements/server.txt
 
 ---
 
-## ▶️ Run the system
+## Run the system
 
 ### 1. Start Whisper server
 
@@ -108,7 +108,7 @@ python3 -m http.server 8080
 
 ---
 
-## 🌐 Usage
+## Usage
 
 ### Speaker
 
@@ -133,7 +133,7 @@ http://localhost:8080/listener.html
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
 ### Model selection (Speaker UI)
 
@@ -143,7 +143,7 @@ http://localhost:8080/listener.html
 
 ---
 
-## 📊 Use Cases
+## Use Cases
 
 - ⛪ Church live translation
 - 🎤 Conferences & talks
@@ -152,7 +152,7 @@ http://localhost:8080/listener.html
 
 ---
 
-## ⚠️ Notes
+## Notes
 
 - Works best with clear audio input
 - Requires modern browser (Chrome recommended)
@@ -160,17 +160,17 @@ http://localhost:8080/listener.html
 
 ---
 
-## 🔮 Future Improvements
+## Future Improvements
 
-- 🔊 External TTS (OpenAI / ElevenLabs)
-- 📱 Mobile optimization
-- 🌐 Multi-language support
-- 📦 Docker deployment
-- ☁️ Cloud deployment (RunPod / GPU servers)
+- External TTS (OpenAI / ElevenLabs)
+- Mobile optimization
+- Multi-language support
+- Docker deployment
+- Cloud deployment (RunPod / GPU servers)
 
 ---
 
-## 📄 License
+## License
 
 MIT License
 
