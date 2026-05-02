@@ -85,7 +85,7 @@ pip install -r rcd ~equirements/server.txt
 ```bash
 cd ~/whisper-live
 
-python run_server.py   --port 8000   --backend faster_whisper   --no_single_model   --raw_pcm_input   --max_connection_time 86400
+python run_server.py --port 8000 --backend faster_whisper --no_single_model --raw_pcm_input --max_connection_time 86400
 ```
 
 ---
