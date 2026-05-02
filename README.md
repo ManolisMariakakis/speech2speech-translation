@@ -78,6 +78,29 @@ pip install -r rcd ~equirements/server.txt
 
 ---
 
+## Core Connections
+
+Three main connections are used:
+
+```text
+whisperWs → Whisper server (port 8000)
+relayWs   → Relay server (port 9001)
+HTTP      → Web server (port 8080)
+```
+
+### Description
+
+* **Whisper WebSocket (8000)**
+  Sends microphone audio and receives real-time transcription/translation.
+
+* **Relay WebSocket (9001)**
+  Forwards processed (stable) translated text to listeners.
+
+* **Web Server (8080)**
+  Hosts the `speaker.html` page (and optionally `listener.html`) via a simple HTTP server (e.g. `python -m http.server 8080`).
+
+---
+
 ## Run the system
 
 ### 1. Start Whisper server
