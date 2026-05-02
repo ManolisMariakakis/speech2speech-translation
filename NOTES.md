@@ -28,11 +28,44 @@ The page includes:
 
 ## 2. Core Connections
 
-Two WebSocket connections are used:
+Three main connections are used:
 
-```js
+```text
 whisperWs → Whisper server (port 8000)
 relayWs   → Relay server (port 9001)
+HTTP      → Web server (port 8080)
+```
+
+### Description
+
+* **Whisper WebSocket (8000)**
+  Sends microphone audio and receives real-time transcription/translation.
+
+* **Relay WebSocket (9001)**
+  Forwards processed (stable) translated text to listeners.
+
+* **Web Server (8080)**
+  Hosts the `speaker.html` page (and optionally `listener.html`) via a simple HTTP server (e.g. `python -m http.server 8080`).
+
+### Typical Run Setup
+
+```bash
+# Whisper server
+python run_server.py --port 8000 ...
+
+# Relay server
+python relay.py  # (port 9001)
+
+# Web server
+python3 -m http.server 8080
+```
+
+This results in:
+
+```text
+http://localhost:8080/speaker.html
+ws://localhost:8000
+ws://localhost:9001
 ```
 
 ---
