@@ -145,10 +145,10 @@ http://localhost:8080/listener.html
 
 ## Use Cases
 
-- ⛪ Church live translation
-- 🎤 Conferences & talks
-- 🌍 Multilingual accessibility
-- 🎧 Real-time interpretation
+- Church live translation
+- Conferences & talks
+- Multilingual accessibility
+- Real-time interpretation
 
 ---
 
